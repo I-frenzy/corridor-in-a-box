@@ -13,6 +13,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   and a `home_domain`; each `PaymentIntent` supplies the recipient `wallet` (`account`, optional `memo`/`memoType`),
   validated by `WalletDestinationSchema`. Schema and validation only: a wallet lane is reported `not-runnable`
   because the engine cannot execute one yet, and `corridor plan` is unchanged.
+
 ### Added — routing choice in the audit trail (#628)
 
 - `RouteDecision` takes an optional `ranking` (`OptionRanking` of `RankedOption`s in
