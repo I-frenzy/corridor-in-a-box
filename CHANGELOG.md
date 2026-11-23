@@ -7,6 +7,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
 
 ## [Unreleased]
 
+### Added — wallet route manifest shape ([#646](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/646))
+
+- `protocol: wallet` destinations: the corridor declares `asset`, `asset_issuer` (optional), `settlement.network`
+  and a `home_domain`; each `PaymentIntent` supplies the recipient `wallet` (`account`, optional `memo`/`memoType`),
+  validated by `WalletDestinationSchema`. Schema and validation only: a wallet lane is reported `not-runnable`
+  because the engine cannot execute one yet, and `corridor plan` is unchanged.
+
 ### Added — a custody statement ([#707](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/707))
 
 - `docs/custody.md` says in one place that the project never holds funds or a key that can

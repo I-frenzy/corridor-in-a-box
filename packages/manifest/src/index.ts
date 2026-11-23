@@ -95,7 +95,7 @@ const CustomDestSchema = AnchorBaseSchema.extend({
  * `PaymentIntent` supplies the recipient `wallet` (`account` and optional `memo`).
  */
 const WalletEndpointsSchema = z.object({
-  home_domain: z.string().min(1).default("stellar"),
+  home_domain: z.string().min(1),
   endpoints_verified_at: AnchorEndpointsSchema.shape.endpoints_verified_at,
 });
 
@@ -103,7 +103,7 @@ export const WalletDestSchema = AnchorBaseSchema.extend({
   protocol: z.literal("wallet"),
   /** Optional Stellar issuer account when `asset` is not native XLM. */
   asset_issuer: z.string().min(1).optional(),
-  endpoints: WalletEndpointsSchema.default(() => ({ home_domain: "stellar" })),
+  endpoints: WalletEndpointsSchema,
 });
 
 /** Schema for the per-payment wallet fields supplied on a `PaymentIntent`. */

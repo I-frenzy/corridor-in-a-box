@@ -9,7 +9,6 @@ import {
   protocolOf,
 } from "@corridor/manifest";
 import type { PaymentIntent } from "@corridor/types";
-import { buildPlan } from "../packages/cli/src/plan";
 
 const WALLET_YAML = `
 id: usdc-stellar-wallet
@@ -21,6 +20,8 @@ dest:
   protocol: wallet
   asset: USDC
   asset_issuer: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+  endpoints:
+    home_domain: wallet.example
 fx:
   path: [USDC, USDC]
   quote_source: native
@@ -46,35 +47,22 @@ describe("wallet route manifest (#646)", () => {
     expect(protocolOf(res.value.dest)).toBe("wallet");
     expect(res.value.dest.asset).toBe("USDC");
     expect(res.value.settlement.network).toBe("testnet");
-    expect(res.value.dest.endpoints.home_domain).toBe("stellar");
+    expect(res.value.dest.endpoints.home_domain).toBe("wallet.example");
     expect(complianceMethod(res.value)).toBe("none");
     expect(res.warnings).toEqual([]);
   });
 
-  it("produces deterministic manifest hashes and verified liveness with no anchor endpoint warnings", () => {
+  it("produces deterministic manifest hashes and never reports a wallet lane as runnable", () => {
     const a = parseCorridorYaml(WALLET_YAML);
     const b = parseCorridorYaml(WALLET_YAML);
     expect(a.ok && b.ok).toBe(true);
     if (!a.ok || !b.ok) return;
 
     expect(hashCorridor(a.value)).toBe(hashCorridor(b.value));
+    // The engine cannot execute a wallet lane yet (RFC 0004 D5), so it must not show as runnable.
     const live = liveness(a.value);
-    expect(live.state).toBe("verified");
-    expect(live.runnable).toBe(true);
-    expect(live.warnings).toEqual([]);
-  });
-
-  it("plans a direct stellar_payment route in corridor plan", () => {
-    const res = parseCorridorYaml(WALLET_YAML);
-    expect(res.ok).toBe(true);
-    if (!res.ok) return;
-
-    const plan = buildPlan(res.value);
-    expect(plan.protocol).toBe("wallet");
-    expect(plan.settlement.kind).toBe("stellar_payment");
-    expect(plan.steps.find((s) => s.verb === "settle")?.detail).toContain(
-      "recipient's wallet",
-    );
+    expect(live.runnable).toBe(false);
+    expect(live.state).toBe("not-runnable");
   });
 
   it("rejects wallet manifests missing asset or settlement network or setting incompatible compliance", () => {

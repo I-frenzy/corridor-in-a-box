@@ -130,13 +130,6 @@ function openStep(protocol: DestProtocol): StepDraft {
   if (protocol === "sep6") {
     return { verb: "open", protocol: "sep6", detail: "SEP-6 POST /withdraw-exchange" };
   }
-  if (protocol === "wallet") {
-    return {
-      verb: "open",
-      protocol: "wallet",
-      detail: "resolve recipient Stellar wallet account and optional memo from intent",
-    };
-  }
   return {
     verb: "open",
     protocol,
@@ -160,13 +153,6 @@ function settleStep(c: Corridor, protocol: DestProtocol): StepDraft {
       detail: `native Stellar payment of ${asset} to the anchor's withdraw account (SEP-6, no deposit memo)`,
     };
   }
-  if (protocol === "wallet") {
-    return {
-      verb: "settle",
-      protocol: "stellar_payment",
-      detail: `direct Stellar payment of ${asset} to the recipient's wallet (with optional memo)`,
-    };
-  }
   return {
     verb: "settle",
     protocol: "adapter_settled",
@@ -180,9 +166,6 @@ function reconcileStep(protocol: DestProtocol): StepDraft {
   }
   if (protocol === "sep6") {
     return { verb: "reconcile", protocol: "sep6", detail: "SEP-6 GET /transaction" };
-  }
-  if (protocol === "wallet") {
-    return { verb: "reconcile", protocol: "wallet", detail: "Horizon ledger confirmation" };
   }
   return { verb: "reconcile", protocol, detail: "adapter transaction status poll" };
 }
