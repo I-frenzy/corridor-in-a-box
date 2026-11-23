@@ -40,6 +40,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   `RoutePlanner` (`packages/router/src/planner.ts`), matching the route planner interface sketch
   in `docs/rfcs/0004-smart-router.md` §1 with TSDoc on every type and field.
 
+### Added — `corridor profile validate` ([#638](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/638))
+
+- `corridor profile validate <file.json> [--json]` checks a sending business's company profile
+  against the v0 JSON schema from #637 (`schemas/company-profile.v0.schema.json`), compiled with
+  ajv. The schema is bundled into the CLI, so the CLI and the schema are one source of truth.
+  Each problem is reported with its path and whether the field is missing, the wrong type or an
+  invalid value. Exit 0 when valid, 1 when not, 2 on bad usage.
+- The CLI exports a `CompanyProfile` type for the v0 profile, and its tests run against the
+  example profile in `schemas/examples/company-profile.v0.json`.
+
 ### Added — a custody statement ([#707](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/707))
 
 - `docs/custody.md` says in one place that the project never holds funds or a key that can

@@ -1,190 +1,122 @@
 // Sending-business company profile validator + `corridor profile validate <file>` (#638).
-// Mirrors the v0 JSON schema (version: "0") so businesses can verify completeness before export.
+//
+// Validates against the versioned JSON schema from #637
+// (`schemas/company-profile.v0.schema.json`) so there is one source of truth for
+// the v0 profile. The schema is bundled into the CLI at build time, like
+// contracts/deployments.json, and compiled once with ajv (draft 2020-12).
 
 import { readFileSync } from "node:fs";
-import { z } from "zod";
+import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
+import companyProfileSchema from "../../../schemas/company-profile.v0.schema.json";
 
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const COUNTRY_RE = /^[A-Z]{2}$/;
-const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
-const STELLAR_PUB_RE = /^G[A-Z2-7]{55}$/;
+type CountryCode = string;
+type IsoDate = string;
 
-function isRealCalendarDate(value: string): boolean {
-  if (!ISO_DATE_RE.test(value)) return false;
-  const [y, m, d] = value.split("-").map(Number) as [number, number, number];
-  const probe = new Date(Date.UTC(y, m - 1, d));
-  return (
-    probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d
-  );
+export interface PostalAddress {
+  readonly line1: string;
+  readonly line2?: string;
+  readonly city: string;
+  readonly region?: string;
+  readonly postalCode?: string;
+  readonly country: CountryCode;
 }
 
-const isoDate = z
-  .string()
-  .refine(isRealCalendarDate, "expected a valid ISO calendar date (YYYY-MM-DD)");
-const countryCode = z
-  .string()
-  .regex(COUNTRY_RE, "expected an ISO 3166-1 alpha-2 country code");
+export interface DocumentReference {
+  readonly id: string;
+  readonly title: string;
+  readonly category:
+    | "incorporation"
+    | "licence"
+    | "ownership"
+    | "identity"
+    | "aml_policy"
+    | "address_proof"
+    | "financials"
+    | "other";
+  /** Relative path or external vault reference; data URIs are forbidden. */
+  readonly path: string;
+  /** Lowercase 64-character hex SHA-256 digest of the referenced file. */
+  readonly sha256: string;
+  readonly date: IsoDate;
+}
 
-const PostalAddressSchema = z
-  .object({
-    line1: z.string().min(1),
-    line2: z.string().min(1).optional(),
-    city: z.string().min(1),
-    region: z.string().min(1).optional(),
-    postalCode: z.string().min(1).optional(),
-    country: countryCode,
-  })
-  .strict();
-
-const DocumentRefSchema = z
-  .object({
-    id: z.string().min(1),
-    title: z.string().min(1),
-    category: z.enum([
-      "incorporation",
-      "licence",
-      "ownership",
-      "identity",
-      "aml_policy",
-      "address_proof",
-      "financials",
-      "other",
-    ]),
-    path: z
-      .string()
-      .min(1)
-      .refine(
-        (v) => !v.startsWith("data:"),
-        "embedded data URIs are forbidden; reference a file path",
-      ),
-    sha256: z.string().regex(SHA256_HEX_RE, "expected a 64-character lowercase hex SHA-256"),
-    date: isoDate,
-  })
-  .strict();
-
-export const CompanyProfileV0Schema = z
-  .object({
-    version: z.literal("0"),
-    legalEntity: z
-      .object({
-        legalName: z.string().min(1),
-        tradingName: z.string().min(1).optional(),
-        entityType: z.string().min(1),
-        countryOfIncorporation: countryCode,
-        incorporatedAt: isoDate,
-        registeredAddress: PostalAddressSchema,
-        operatingAddress: PostalAddressSchema.optional(),
-        website: z.string().url().optional(),
-      })
-      .strict(),
-    registrationNumbers: z
-      .array(
-        z
-          .object({
-            country: countryCode,
-            authority: z.string().min(1),
-            number: z.string().min(1),
-            issuedAt: isoDate.optional(),
-            documentRefId: z.string().min(1).optional(),
-          })
-          .strict(),
-      )
-      .min(1),
-    licences: z.array(
-      z
-        .object({
-          jurisdiction: countryCode,
-          licenceType: z.string().min(1),
-          licenceNumber: z.string().min(1),
-          regulator: z.string().min(1),
-          status: z.enum(["active", "pending", "exempt", "expired", "revoked"]),
-          validUntil: isoDate.optional(),
-          documentRefId: z.string().min(1).optional(),
-        })
-        .strict(),
-    ),
-    ownership: z
-      .object({
-        beneficialOwners: z
-          .array(
-            z
-              .object({
-                fullName: z.string().min(1),
-                ownershipPercent: z.number().min(0).max(100),
-                nationality: countryCode,
-                countryOfResidence: countryCode,
-                isPep: z.boolean().optional(),
-                role: z.string().min(1).optional(),
-                documentRefId: z.string().min(1).optional(),
-              })
-              .strict(),
-          )
-          .min(1),
-        directors: z
-          .array(
-            z
-              .object({
-                fullName: z.string().min(1),
-                role: z.string().min(1),
-                nationality: countryCode,
-                countryOfResidence: countryCode,
-                appointedAt: isoDate.optional(),
-                documentRefId: z.string().min(1).optional(),
-              })
-              .strict(),
-          )
-          .min(1),
-      })
-      .strict(),
-    amlCft: z
-      .object({
-        policyVersion: z.string().min(1),
-        policyDate: isoDate,
-        complianceOfficer: z
-          .object({
-            name: z.string().min(1),
-            title: z.string().min(1),
-            email: z.string().email(),
-            phone: z.string().min(1).optional(),
-          })
-          .strict(),
-        screeningProviders: z.array(z.string().min(1)).optional(),
-        sanctionsRegimes: z.array(z.string().min(1)).min(1),
-        transactionMonitoringSummary: z.string().min(1),
-        documentRefId: z.string().min(1).optional(),
-      })
-      .strict(),
-    stellarAccounts: z
-      .array(
-        z
-          .object({
-            network: z.enum(["public", "testnet"]),
-            publicKey: z
-              .string()
-              .regex(STELLAR_PUB_RE, "expected a valid Stellar G... public key"),
-            purpose: z.enum(["settlement", "sep10_auth", "treasury", "distribution", "fee"]),
-            label: z.string().min(1).optional(),
-          })
-          .strict(),
-      )
-      .min(1),
-    contacts: z
-      .array(
-        z
-          .object({
-            role: z.enum(["primary", "compliance", "technical", "finance", "legal"]),
-            name: z.string().min(1),
-            email: z.string().email(),
-            phone: z.string().min(1).optional(),
-          })
-          .strict(),
-      )
-      .min(1),
-    documentReferences: z.array(DocumentRefSchema).min(1),
-  })
-  .strict();
-
-export type CompanyProfile = z.infer<typeof CompanyProfileV0Schema>;
+/** A v0 company profile, as `schemas/company-profile.v0.schema.json` defines it. */
+export interface CompanyProfile {
+  readonly version: "0";
+  readonly legalEntity: {
+    readonly legalName: string;
+    readonly tradingName?: string;
+    readonly entityType: string;
+    readonly countryOfIncorporation: CountryCode;
+    readonly incorporatedAt: IsoDate;
+    readonly registeredAddress: PostalAddress;
+    readonly operatingAddress?: PostalAddress;
+    readonly website?: string;
+  };
+  readonly registrationNumbers: ReadonlyArray<{
+    readonly country: CountryCode;
+    readonly authority: string;
+    readonly number: string;
+    readonly issuedAt?: IsoDate;
+    readonly documentRefId?: string;
+  }>;
+  readonly licences: ReadonlyArray<{
+    readonly jurisdiction: CountryCode;
+    readonly licenceType: string;
+    readonly licenceNumber: string;
+    readonly regulator: string;
+    readonly status: "active" | "pending" | "exempt" | "expired" | "revoked";
+    readonly validUntil?: IsoDate;
+    readonly documentRefId?: string;
+  }>;
+  readonly ownership: {
+    readonly beneficialOwners: ReadonlyArray<{
+      readonly fullName: string;
+      readonly ownershipPercent: number;
+      readonly nationality: CountryCode;
+      readonly countryOfResidence: CountryCode;
+      readonly isPep?: boolean;
+      readonly role?: string;
+      readonly documentRefId?: string;
+    }>;
+    readonly directors: ReadonlyArray<{
+      readonly fullName: string;
+      readonly role: string;
+      readonly nationality: CountryCode;
+      readonly countryOfResidence: CountryCode;
+      readonly appointedAt?: IsoDate;
+      readonly documentRefId?: string;
+    }>;
+  };
+  readonly amlCft: {
+    readonly policyVersion: string;
+    readonly policyDate: IsoDate;
+    readonly complianceOfficer: {
+      readonly name: string;
+      readonly title: string;
+      readonly email: string;
+      readonly phone?: string;
+    };
+    readonly screeningProviders?: readonly string[];
+    readonly sanctionsRegimes: readonly string[];
+    readonly transactionMonitoringSummary: string;
+    readonly documentRefId?: string;
+  };
+  readonly stellarAccounts: ReadonlyArray<{
+    readonly network: "public" | "testnet";
+    readonly publicKey: string;
+    readonly purpose: "settlement" | "sep10_auth" | "treasury" | "distribution" | "fee";
+    readonly label?: string;
+  }>;
+  readonly contacts: ReadonlyArray<{
+    readonly role: "primary" | "compliance" | "technical" | "finance" | "legal";
+    readonly name: string;
+    readonly email: string;
+    readonly phone?: string;
+  }>;
+  readonly documentReferences: readonly DocumentReference[];
+}
 
 export interface ProfileValidationIssue {
   readonly path: string;
@@ -196,26 +128,50 @@ export type ProfileValidationResult =
   | { readonly ok: true; readonly profile: CompanyProfile }
   | { readonly ok: false; readonly issues: readonly ProfileValidationIssue[] };
 
-function classifyZodIssue(issue: z.ZodIssue): ProfileValidationIssue["kind"] {
-  if (issue.code === "invalid_type") {
-    const received = (issue as { received?: unknown }).received;
-    const messageSaysUndefined = issue.message.toLowerCase().includes("received undefined");
-    return received === "undefined" || messageSaysUndefined ? "missing" : "invalid_type";
+const ajv = new Ajv2020({ strict: true, allErrors: true });
+addFormats(ajv);
+const validateSchema = ajv.compile<CompanyProfile>(companyProfileSchema);
+
+/** `/legalEntity/registeredAddress/0` → `legalEntity.registeredAddress.0`, plus a trailing key. */
+function issuePath(instancePath: string, key?: string): string {
+  const parts = instancePath
+    .split("/")
+    .slice(1)
+    .map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"));
+  if (key !== undefined) parts.push(key);
+  return parts.length > 0 ? parts.join(".") : "<root>";
+}
+
+function toIssue(error: ErrorObject): ProfileValidationIssue {
+  const params = error.params as Record<string, unknown>;
+  if (error.keyword === "required") {
+    const missing = String(params.missingProperty);
+    return {
+      path: issuePath(error.instancePath, missing),
+      kind: "missing",
+      message: `missing required property "${missing}"`,
+    };
   }
-  return "invalid_value";
+  if (error.keyword === "additionalProperties") {
+    const extra = String(params.additionalProperty);
+    return {
+      path: issuePath(error.instancePath, extra),
+      kind: "invalid_value",
+      message: `unknown property "${extra}" is not allowed`,
+    };
+  }
+  return {
+    path: issuePath(error.instancePath),
+    kind: error.keyword === "type" ? "invalid_type" : "invalid_value",
+    message: error.message ?? `failed ${error.keyword}`,
+  };
 }
 
 export function validateCompanyProfile(raw: unknown): ProfileValidationResult {
-  const parsed = CompanyProfileV0Schema.safeParse(raw);
-  if (parsed.success) {
-    return { ok: true, profile: parsed.data };
+  if (validateSchema(raw)) {
+    return { ok: true, profile: raw };
   }
-  const issues: ProfileValidationIssue[] = parsed.error.issues.map((issue) => ({
-    path: issue.path.length > 0 ? issue.path.join(".") : "<root>",
-    kind: classifyZodIssue(issue),
-    message: issue.message,
-  }));
-  return { ok: false, issues };
+  return { ok: false, issues: (validateSchema.errors ?? []).map(toIssue) };
 }
 
 export function loadAndValidateProfile(filePath: string): ProfileValidationResult {
