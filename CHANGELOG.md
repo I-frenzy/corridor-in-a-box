@@ -40,6 +40,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   `RoutePlanner` (`packages/router/src/planner.ts`), matching the route planner interface sketch
   in `docs/rfcs/0004-smart-router.md` §1 with TSDoc on every type and field.
 
+### Added — onboarding exporter for the self-hosted reference anchor ([#640](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/640))
+
+- `referenceAnchorExporter` is the first real `OnboardingExporter` (#639). It maps the shared
+  `BusinessProfile` onto the SEP-12 fields the SDF Anchor Platform reference server
+  (`scripts/reference-anchor.sh`) takes for a `sep31-sender`: the representative's SEP-9
+  natural-person fields, plus the business under the SEP-9 `organization.*` keys, with countries
+  encoded as ISO-3166-1 alpha-3.
+- `businessProfileFromCompanyProfile()` reads a v0 company profile (#637) into that
+  `BusinessProfile`, and `senderAccountFor()` picks the Stellar account to register under.
+  `registerReferenceAnchorSender()` submits the form through the SEP-31 adapter's
+  `registerCustomer`. Documents are never uploaded, only referenced by hash. The tests run
+  against `schemas/examples/company-profile.v0.json`.
+- `toAlpha3()` in `@corridor/probe` converts the alpha-2 codes its country table holds to
+  alpha-3.
+
 ### Added — a custody statement ([#707](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/707))
 
 - `docs/custody.md` says in one place that the project never holds funds or a key that can

@@ -1,157 +1,158 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import Ajv2020 from "ajv/dist/2020";
+import addFormats from "ajv-formats";
 import { describe, expect, it } from "vitest";
+import { createExporterRegistry, type BusinessProfile } from "@corridor/adapter-kit";
+import { loadCorridor } from "@corridor/manifest";
+import { Sep31Adapter } from "@corridor/sep31";
 import {
-  applyExportToReferenceAnchor,
-  exportProfileForReferenceAnchor,
-  type CompanyProfileLike,
+  REFERENCE_ANCHOR_SENDER_TYPE,
+  businessProfileFromCompanyProfile,
+  referenceAnchorExporter,
+  registerReferenceAnchorSender,
+  senderAccountFor,
+  type CompanyProfileV0,
 } from "../packages/cli/src/reference-exporter";
 
-const EXAMPLE_PROFILE_FALLBACK: CompanyProfileLike = {
-  version: "0",
-  legalEntity: {
-    legalName: "Acorn Cross-Border Payments Ltd.",
-    tradingName: "Acorn Pay",
-    countryOfIncorporation: "GB",
-    registeredAddress: {
-      line1: "20 Bishopsgate",
-      city: "London",
-      postalCode: "EC2N 4AG",
-      country: "GB",
-    },
-  },
-  registrationNumbers: [
-    {
-      country: "GB",
-      authority: "Companies House",
-      number: "14812345",
-    },
-  ],
-  licences: [
-    {
-      jurisdiction: "GB",
-      licenceType: "Authorised Payment Institution",
-      licenceNumber: "FCA-901234",
-      status: "active",
-    },
-  ],
-  amlCft: {
-    policyVersion: "2026.2",
-    policyDate: "2026-06-01",
-    complianceOfficer: {
-      name: "Priya Patel",
-      title: "Money Laundering Reporting Officer",
-      email: "compliance@acornpay.example",
-      phone: "+44 20 7946 0192",
-    },
-    sanctionsRegimes: ["OFAC", "UK-OFSI", "EU", "UN"],
-  },
-  stellarAccounts: [
-    {
-      network: "public",
-      publicKey: "GBN4NNCDGJO4XW4KQU3CBIESUJWFVBUZPOKUZHT7W7WRB7CWOA7BXVQF",
-      purpose: "settlement",
-      label: "Production settlement wallet",
-    },
-    {
-      network: "testnet",
-      publicKey: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-      purpose: "sep10_auth",
-      label: "Testnet SEP-10 client key",
-    },
-  ],
-  contacts: [
-    {
-      role: "primary",
-      name: "Adaeze Okafor",
-      email: "ops@acornpay.example",
-    },
-    {
-      role: "compliance",
-      name: "Priya Patel",
-      email: "compliance@acornpay.example",
-    },
-  ],
-  documentReferences: [
-    {
-      id: "doc-incorp",
-      title: "Certificate of Incorporation",
-      category: "incorporation",
-      path: "onboarding/docs/certificate-of-incorporation.pdf",
-      sha256: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-      date: "2023-04-12",
-    },
-  ],
-};
+const repoFile = (path: string) => fileURLToPath(new URL(`../${path}`, import.meta.url));
 
-function loadExampleProfile(): CompanyProfileLike {
-  const path = new URL("../schemas/examples/company-profile.v0.json", import.meta.url);
-  if (existsSync(path)) {
-    return JSON.parse(readFileSync(path, "utf8")) as CompanyProfileLike;
-  }
-  return EXAMPLE_PROFILE_FALLBACK;
+// The example profile #637 ships with the v0 schema is the fixture.
+const SCHEMA = JSON.parse(
+  readFileSync(repoFile("schemas/company-profile.v0.schema.json"), "utf8"),
+);
+const EXAMPLE = JSON.parse(
+  readFileSync(repoFile("schemas/examples/company-profile.v0.json"), "utf8"),
+) as CompanyProfileV0;
+
+function exampleBusiness(): BusinessProfile {
+  const mapped = businessProfileFromCompanyProfile(EXAMPLE);
+  if (!mapped.ok) throw new Error(mapped.error.message);
+  return mapped.value;
 }
 
 describe("reference-anchor onboarding exporter (#640)", () => {
-  it("exports the example company profile into SEP-12 sep31-sender fields and Stellar account config", () => {
-    const profile = loadExampleProfile();
-    const exported = exportProfileForReferenceAnchor(profile);
+  it("starts from an example profile that passes the v0 schema", () => {
+    const ajv = new Ajv2020({ strict: true, allErrors: true });
+    addFormats(ajv);
+    const validate = ajv.compile(SCHEMA);
+    expect(validate(EXAMPLE), JSON.stringify(validate.errors)).toBe(true);
+  });
 
-    expect(exported.target).toBe("reference-anchor");
-    expect(exported.network).toBe("testnet");
-    expect(exported.sep12Type).toBe("sep31-sender");
-    expect(exported.stellarAccount).toBe(
-      "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  it("reads the v0 profile into the shared BusinessProfile", () => {
+    const business = exampleBusiness();
+    expect(business.legalName).toBe(EXAMPLE.legalEntity.legalName);
+    expect(business.country).toBe(EXAMPLE.legalEntity.countryOfIncorporation);
+    expect(business.incorporationDate).toBe(EXAMPLE.legalEntity.incorporatedAt);
+    expect(business.address).toEqual(EXAMPLE.legalEntity.registeredAddress);
+    const incorporated = EXAMPLE.registrationNumbers.find(
+      (r) => r.country === EXAMPLE.legalEntity.countryOfIncorporation,
     );
-    expect(exported.sep12Fields).toMatchObject({
-      type: "sep31-sender",
-      account: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-      organization_name: "Acorn Cross-Border Payments Ltd.",
-      organization_registration_number: "14812345",
-      organization_country_code: "GB",
-      first_name: "Priya",
-      last_name: "Patel",
-      email_address: "compliance@acornpay.example",
-      city: "London",
-      country_code: "GB",
-    });
-    expect(exported.documentHashes.length).toBeGreaterThanOrEqual(1);
-    expect(exported.anchorEnv.SEP_URL).toBe("http://localhost:8080");
+    expect(business.registrationNumber).toBe(incorporated?.number);
+    expect(business.contacts.map((c) => c.role)).toEqual(
+      EXAMPLE.contacts.filter((c) => c.role !== "legal").map((c) => c.role),
+    );
   });
 
-  it("refuses export when no Stellar account matches the requested network", () => {
-    const noTestnet: CompanyProfileLike = {
-      ...EXAMPLE_PROFILE_FALLBACK,
-      stellarAccounts: EXAMPLE_PROFILE_FALLBACK.stellarAccounts.filter(
-        (a) => a.network !== "testnet",
-      ),
+  it("registers as an OnboardingExporter and maps onto SEP-9 organization.* keys", () => {
+    const registry = createExporterRegistry();
+    expect(registry.register(referenceAnchorExporter).ok).toBe(true);
+
+    const res = registry.export("reference-anchor", exampleBusiness());
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const form = res.value;
+    const { legalEntity } = EXAMPLE;
+
+    expect(form["organization.name"]).toBe(legalEntity.legalName);
+    expect(form["organization.registration_number"]).toBe(
+      exampleBusiness().registrationNumber,
+    );
+    expect(form["organization.registration_date"]).toBe(legalEntity.incorporatedAt);
+    expect(form["organization.city"]).toBe(legalEntity.registeredAddress.city);
+    expect(form["organization.registered_address"]).toContain(
+      legalEntity.registeredAddress.line1,
+    );
+    // SEP-9 encodes countries as ISO-3166-1 alpha-3; the profile carries alpha-2 ("GB").
+    expect(form["organization.address_country_code"]).toBe("GBR");
+
+    // The representative fills the natural-person fields the reference server requires.
+    const compliance = EXAMPLE.contacts.find((c) => c.role === "compliance")!;
+    expect(form.email_address).toBe(compliance.email);
+    expect(`${form.first_name} ${form.last_name}`).toBe(compliance.name);
+
+    // No made-up keys: everything is a SEP-9 natural-person or organization.* field.
+    const naturalPerson = new Set(["first_name", "last_name", "email_address"]);
+    for (const key of Object.keys(form)) {
+      expect(naturalPerson.has(key) || key.startsWith("organization."), key).toBe(true);
+    }
+  });
+
+  it("fails with PROFILE_INCOMPLETE instead of guessing", () => {
+    const noContact = { ...exampleBusiness(), contacts: [] };
+    const res = referenceAnchorExporter.export(noContact);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PROFILE_INCOMPLETE");
+
+    const onlyTreasury: CompanyProfileV0 = {
+      ...EXAMPLE,
+      stellarAccounts: [
+        {
+          network: "testnet",
+          publicKey: EXAMPLE.stellarAccounts[0]!.publicKey,
+          purpose: "treasury",
+        },
+      ],
     };
-    expect(() => exportProfileForReferenceAnchor(noTestnet)).toThrow(/network "testnet"/);
+    const account = senderAccountFor(onlyTreasury, "testnet");
+    expect(account.ok).toBe(false);
+    if (!account.ok) expect(account.error.code).toBe("PROFILE_INCOMPLETE");
   });
 
-  it("submits exported sep31-sender fields to the reference anchor SEP-12 endpoint", async () => {
-    const exported = exportProfileForReferenceAnchor(loadExampleProfile());
-    const calls: Array<{ url: string; method: string; auth?: string; body: unknown }> = [];
-
-    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
-      const headers = (init?.headers ?? {}) as Record<string, string>;
-      calls.push({
-        url: String(url),
-        method: init?.method ?? "GET",
-        auth: headers.authorization,
-        body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
-      });
-      return new Response(JSON.stringify({ id: "ref-sender-123" }), { status: 200 });
-    }) as typeof fetch;
-
-    const applied = await applyExportToReferenceAnchor(exported, {
-      authToken: "sep10-jwt-test",
-      fetchImpl,
+  it("leaves out a country it cannot encode as alpha-3 rather than sending alpha-2", () => {
+    const business = exampleBusiness();
+    const res = referenceAnchorExporter.export({
+      ...business,
+      address: { ...business.address, country: "ZZ" },
     });
-    expect(applied.ok).toBe(true);
-    if (applied.ok) expect(applied.value.customerId).toBe("ref-sender-123");
-    expect(calls[0]?.url).toBe("http://localhost:8080/sep12/customer");
-    expect(calls[0]?.method).toBe("PUT");
-    expect(calls[0]?.auth).toBe("Bearer sep10-jwt-test");
-    expect(calls[0]?.body).toEqual(exported.sep12Fields);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value["organization.address_country_code"]).toBeUndefined();
+  });
+
+  it("registers the sender through the SEP-31 adapter's registerCustomer", async () => {
+    const corridor = loadCorridor(repoFile("corridors/reference.corridor.yaml"));
+    if (!corridor.ok) throw new Error(corridor.error.message);
+
+    const calls: Array<{ url: string; method?: string; body: Record<string, string> }> = [];
+    const adapter = new Sep31Adapter(corridor.value, {
+      fetchImpl: (async (url: string | URL, init?: RequestInit) => {
+        calls.push({
+          url: String(url),
+          method: init?.method,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, string>,
+        });
+        return new Response(JSON.stringify({ id: "sender-123" }), { status: 202 });
+      }) as typeof fetch,
+    });
+
+    const form = referenceAnchorExporter.export(exampleBusiness());
+    if (!form.ok) throw new Error(form.error.message);
+    const account = senderAccountFor(EXAMPLE, "testnet");
+    if (!account.ok) throw new Error(account.error.message);
+
+    const registered = await registerReferenceAnchorSender(adapter, form.value, {
+      account: account.value,
+    });
+    expect(registered).toEqual({ ok: true, value: "sender-123" });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("PUT");
+    const kycServer = (corridor.value.dest.endpoints as Record<string, unknown>).kyc_server;
+    expect(calls[0]!.url).toBe(`${String(kycServer)}/customer`);
+    expect(calls[0]!.body).toMatchObject({
+      type: REFERENCE_ANCHOR_SENDER_TYPE,
+      account: account.value,
+      "organization.name": EXAMPLE.legalEntity.legalName,
+    });
   });
 });

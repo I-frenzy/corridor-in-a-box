@@ -1,20 +1,44 @@
-// First onboarding exporter targeting the self-hosted SDF Anchor Platform reference
-// server (`scripts/reference-anchor.sh`, SEP server at http://localhost:8080) (#640).
+// Onboarding exporter for the self-hosted SDF Anchor Platform reference server
+// (`scripts/reference-anchor.sh`, SEP server at http://localhost:8080) (#640).
 //
-// Maps a validated v0 company profile into:
-//   1. A SEP-12 `PUT /sep12/customer` payload for `type: "sep31-sender"` ( matching what
-//      examples/run-testnet.ts and Anchor Platform's sep31-sender type expect).
-//   2. The sender's SEP-10 client / settlement Stellar account metadata.
-//   3. Reference-only document hashes (path + sha256 + date — binary files are never uploaded).
+// Built on what already ships, in three steps:
+//   1. `businessProfileFromCompanyProfile()` reads a v0 company profile (#637,
+//      `schemas/company-profile.v0.schema.json`) into adapter-kit's shared
+//      `BusinessProfile`, the type every onboarding exporter takes (#639).
+//   2. `referenceAnchorExporter` is an `OnboardingExporter` that maps that profile onto
+//      the SEP-12 fields the reference server takes for a `sep31-sender`: the
+//      representative's SEP-9 natural-person fields, and the business under the SEP-9
+//      `organization.*` keys.
+//   3. `registerReferenceAnchorSender()` submits the form through the SEP-31 adapter's
+//      `registerCustomer` (SEP-12 `PUT /customer`), so SEP-10 auth and error handling are
+//      the same as for every other registration.
+//
+// Document files are never uploaded: their path, sha256 and date stay in the profile.
 
-import { fail, ok, type Outcome } from "@corridor/types";
+import type {
+  BusinessProfile,
+  ExporterError,
+  OnboardingExporter,
+  ReceiverForm,
+} from "@corridor/adapter-kit";
+import { toAlpha3 } from "@corridor/probe";
+import type { Sep31Adapter } from "@corridor/sep31";
+import { err, ok, type Outcome } from "@corridor/types";
 
-export interface CompanyProfileLike {
+/** The SEP-12 customer type the reference server registers a sending business under. */
+export const REFERENCE_ANCHOR_SENDER_TYPE = "sep31-sender";
+
+/**
+ * The parts of a v0 company profile (`schemas/company-profile.v0.schema.json`) this
+ * exporter reads. Any profile that passes the schema satisfies it.
+ */
+export interface CompanyProfileV0 {
   readonly version: "0";
   readonly legalEntity: {
     readonly legalName: string;
     readonly tradingName?: string;
     readonly countryOfIncorporation: string;
+    readonly incorporatedAt: string;
     readonly registeredAddress: {
       readonly line1: string;
       readonly line2?: string;
@@ -23,213 +47,168 @@ export interface CompanyProfileLike {
       readonly postalCode?: string;
       readonly country: string;
     };
+    readonly website?: string;
   };
   readonly registrationNumbers: ReadonlyArray<{
     readonly country: string;
     readonly authority: string;
     readonly number: string;
   }>;
-  readonly licences: ReadonlyArray<{
-    readonly jurisdiction: string;
-    readonly licenceType: string;
-    readonly licenceNumber: string;
-    readonly status: string;
-  }>;
-  readonly amlCft: {
-    readonly policyVersion: string;
-    readonly policyDate: string;
-    readonly complianceOfficer: {
-      readonly name: string;
-      readonly title: string;
-      readonly email: string;
-      readonly phone?: string;
-    };
-    readonly sanctionsRegimes: readonly string[];
-  };
   readonly stellarAccounts: ReadonlyArray<{
     readonly network: "public" | "testnet";
     readonly publicKey: string;
     readonly purpose: "settlement" | "sep10_auth" | "treasury" | "distribution" | "fee";
-    readonly label?: string;
   }>;
   readonly contacts: ReadonlyArray<{
-    readonly role: string;
+    readonly role: "primary" | "compliance" | "technical" | "finance" | "legal";
     readonly name: string;
     readonly email: string;
     readonly phone?: string;
   }>;
-  readonly documentReferences: ReadonlyArray<{
-    readonly id: string;
-    readonly title: string;
-    readonly category: string;
-    readonly path: string;
-    readonly sha256: string;
-    readonly date: string;
-  }>;
 }
 
-export interface ReferenceAnchorExport {
-  readonly target: "reference-anchor";
-  readonly network: "public" | "testnet";
-  readonly sep12Type: "sep31-sender";
-  /** SEP-10 authenticated Stellar public key representing the sending business. */
-  readonly stellarAccount: string;
-  /** Key-value fields ready to submit to `PUT <sepUrl>/sep12/customer`. */
-  readonly sep12Fields: Readonly<Record<string, string>>;
-  /** Every matching Stellar account configured for the target network. */
-  readonly stellarAccounts: ReadonlyArray<{
-    readonly publicKey: string;
-    readonly purpose: string;
-    readonly label?: string;
-  }>;
-  /** Hashed document references passed as provenance without embedding files. */
-  readonly documentHashes: ReadonlyArray<{
-    readonly id: string;
-    readonly category: string;
-    readonly sha256: string;
-    readonly date: string;
-  }>;
-  /** Suggested env variables aligned with `scripts/reference-anchor.sh`. */
-  readonly anchorEnv: Readonly<Record<string, string>>;
-}
+type BusinessContact = BusinessProfile["contacts"][number];
 
-function splitName(fullName: string): { firstName: string; lastName: string } {
-  const parts = fullName.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return { firstName: "Compliance", lastName: "Officer" };
-  if (parts.length === 1) return { firstName: parts[0]!, lastName: parts[0]! };
-  return { firstName: parts[0]!, lastName: parts.slice(1).join(" ") };
+function incomplete(message: string): Outcome<never, ExporterError> {
+  return err({ code: "PROFILE_INCOMPLETE", message });
 }
 
 /**
- * Convert a v0 company profile into a self-hosted reference-anchor sender bundle.
- * Throws a descriptive Error if required sender identity, registration, or Stellar
- * account fields are missing for the requested network.
+ * Read a v0 company profile into adapter-kit's `BusinessProfile`. The registration
+ * number is the one issued in the country of incorporation, falling back to the first.
+ * `legal` contacts are dropped: `BusinessProfile` has no such role.
  */
-export function exportProfileForReferenceAnchor(
-  profile: CompanyProfileLike,
-  opts: { readonly network?: "testnet" | "public"; readonly sepUrl?: string } = {},
-): ReferenceAnchorExport {
+export function businessProfileFromCompanyProfile(
+  profile: CompanyProfileV0,
+): Outcome<BusinessProfile, ExporterError> {
   if (profile.version !== "0") {
-    throw new Error(`unsupported company profile version "${String(profile.version)}"`);
+    return incomplete(`unsupported company profile version "${String(profile.version)}"`);
   }
-  const network = opts.network ?? "testnet";
-  const sepUrl = (opts.sepUrl ?? "http://localhost:8080").replace(/\/+$/, "");
+  const { legalEntity } = profile;
+  const registration =
+    profile.registrationNumbers.find(
+      (r) => r.country === legalEntity.countryOfIncorporation,
+    ) ?? profile.registrationNumbers[0];
+  if (!registration) {
+    return incomplete("company profile has no registrationNumbers entry");
+  }
+  const contacts = profile.contacts.filter(
+    (c): c is CompanyProfileV0["contacts"][number] & BusinessContact => c.role !== "legal",
+  );
+  return ok<BusinessProfile>({
+    legalName: legalEntity.legalName,
+    ...(legalEntity.tradingName ? { tradingName: legalEntity.tradingName } : {}),
+    registrationNumber: registration.number,
+    country: legalEntity.countryOfIncorporation,
+    incorporationDate: legalEntity.incorporatedAt,
+    ...(legalEntity.website ? { website: legalEntity.website } : {}),
+    address: legalEntity.registeredAddress,
+    contacts: contacts.map(({ role, name, email, phone }) => ({
+      role,
+      name,
+      email,
+      ...(phone ? { phone } : {}),
+    })),
+  });
+}
 
-  const networkAccounts = profile.stellarAccounts.filter((a) => a.network === network);
-  if (networkAccounts.length === 0) {
-    throw new Error(
-      `company profile declares no Stellar account for network "${network}" required by reference anchor`,
+/**
+ * The Stellar account the business authenticates with on `network`: its `sep10_auth`
+ * account, else its `settlement` account. This is the `account` the SEP-12 customer
+ * is registered under.
+ */
+export function senderAccountFor(
+  profile: CompanyProfileV0,
+  network: "public" | "testnet",
+): Outcome<string, ExporterError> {
+  const onNetwork = profile.stellarAccounts.filter((a) => a.network === network);
+  const account =
+    onNetwork.find((a) => a.purpose === "sep10_auth") ??
+    onNetwork.find((a) => a.purpose === "settlement");
+  if (!account) {
+    return incomplete(
+      `company profile has no sep10_auth or settlement Stellar account on ${network}`,
     );
   }
-  const preferredAccount =
-    networkAccounts.find((a) => a.purpose === "sep10_auth") ??
-    networkAccounts.find((a) => a.purpose === "settlement") ??
-    networkAccounts[0]!;
+  return ok(account.publicKey);
+}
 
-  const contact =
-    profile.contacts.find((c) => c.role === "compliance") ??
-    profile.contacts.find((c) => c.role === "primary") ??
-    profile.contacts[0];
-  const officer = profile.amlCft.complianceOfficer;
-  const representativeName = contact?.name ?? officer.name;
-  const representativeEmail = contact?.email ?? officer.email;
-  const representativePhone = contact?.phone ?? officer.phone;
-  const { firstName, lastName } = splitName(representativeName);
-
-  const reg = profile.registrationNumbers[0];
-  if (!reg) {
-    throw new Error("company profile requires at least one registrationNumbers entry");
-  }
-
-  const addr = profile.legalEntity.registeredAddress;
-  const streetAddress = addr.line2 ? `${addr.line1}, ${addr.line2}` : addr.line1;
-
-  const sep12Fields: Record<string, string> = {
-    type: "sep31-sender",
-    account: preferredAccount.publicKey,
-    first_name: firstName,
-    last_name: lastName,
-    email_address: representativeEmail,
-    ...(representativePhone ? { phone_number: representativePhone } : {}),
-    organization_name: profile.legalEntity.legalName,
-    organization_registration_number: reg.number,
-    organization_registration_authority: reg.authority,
-    organization_country_code: profile.legalEntity.countryOfIncorporation,
-    address: streetAddress,
-    city: addr.city,
-    ...(addr.postalCode ? { postal_code: addr.postalCode } : {}),
-    country_code: addr.country,
-  };
-
-  return {
-    target: "reference-anchor",
-    network,
-    sep12Type: "sep31-sender",
-    stellarAccount: preferredAccount.publicKey,
-    sep12Fields,
-    stellarAccounts: networkAccounts.map(({ publicKey, purpose, label }) => ({
-      publicKey,
-      purpose,
-      ...(label ? { label } : {}),
-    })),
-    documentHashes: profile.documentReferences.map(({ id, category, sha256, date }) => ({
-      id,
-      category,
-      sha256,
-      date,
-    })),
-    anchorEnv: {
-      SEP_URL: sepUrl,
-      SENDER_SEP12_TYPE: "sep31-sender",
-      SENDER_STELLAR_ACCOUNT: preferredAccount.publicKey,
-    },
-  };
+function splitName(fullName: string): { first: string; last: string } | undefined {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return undefined;
+  return { first: parts[0]!, last: parts.slice(1).join(" ") };
 }
 
 /**
- * Submit an exported sender bundle to the reference anchor's SEP-12 `/sep12/customer`
- * endpoint and return the issued customer id (`SENDER_SEP12_ID`).
+ * Maps a `BusinessProfile` onto the reference server's `sep31-sender` SEP-12 fields.
+ * The representative (compliance contact, else primary) fills the SEP-9 natural-person
+ * fields the reference server requires; the business goes under `organization.*`.
+ * Countries are sent as ISO-3166-1 alpha-3, as SEP-9 encodes them.
  */
-export async function applyExportToReferenceAnchor(
-  exported: ReferenceAnchorExport,
-  opts: {
-    readonly sepUrl?: string;
-    readonly authToken?: string;
-    readonly fetchImpl?: typeof fetch;
-  } = {},
-): Promise<Outcome<{ readonly customerId: string }>> {
-  const sepUrl = (
-    opts.sepUrl ??
-    exported.anchorEnv.SEP_URL ??
-    "http://localhost:8080"
-  ).replace(/\/+$/, "");
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  try {
-    const res = await fetchImpl(`${sepUrl}/sep12/customer`, {
-      method: "PUT",
-      headers: {
-        "content-type": "application/json",
-        ...(opts.authToken ? { authorization: `Bearer ${opts.authToken}` } : {}),
-      },
-      body: JSON.stringify(exported.sep12Fields),
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      return fail(
-        "KYC_REQUIRED",
-        `reference-anchor SEP-12 PUT /sep12/customer HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`,
-        { retryable: res.status >= 500 },
+export const referenceAnchorExporter: OnboardingExporter = {
+  id: "reference-anchor",
+  receiver: "SDF Anchor Platform reference server",
+  export(profile: BusinessProfile): Outcome<ReceiverForm, ExporterError> {
+    const representative =
+      profile.contacts.find((c) => c.role === "compliance") ??
+      profile.contacts.find((c) => c.role === "primary");
+    if (!representative) {
+      return incomplete("the reference anchor requires a compliance or primary contact");
+    }
+    const name = splitName(representative.name);
+    if (!name) {
+      return incomplete(
+        `the reference anchor requires a first and last name for ${representative.name || "the representative"}`,
       );
     }
-    const body = (await res.json()) as { id?: string };
-    if (!body.id) {
-      return fail("KYC_REQUIRED", "reference-anchor SEP-12 response missing customer id");
+    const primary = profile.contacts.find((c) => c.role === "primary") ?? representative;
+    const { address } = profile;
+    const countryAlpha3 = toAlpha3(address.country);
+
+    const form: Record<string, string> = {
+      first_name: name.first,
+      last_name: name.last,
+      email_address: representative.email,
+      "organization.name": profile.legalName,
+      "organization.registration_number": profile.registrationNumber,
+      "organization.registered_address": [
+        address.line1,
+        address.line2,
+        address.city,
+        address.region,
+        address.postalCode,
+        address.country,
+      ]
+        .filter(Boolean)
+        .join(", "),
+      "organization.city": address.city,
+      "organization.email": primary.email,
+    };
+    if (profile.incorporationDate) {
+      form["organization.registration_date"] = profile.incorporationDate;
     }
-    return ok({ customerId: body.id });
-  } catch (cause) {
-    return fail("ANCHOR_UNAVAILABLE", "reference-anchor SEP-12 request failed", {
-      retryable: true,
-      cause,
-    });
-  }
+    if (countryAlpha3) form["organization.address_country_code"] = countryAlpha3;
+    if (address.region) form["organization.state_or_province"] = address.region;
+    if (address.postalCode) form["organization.postal_code"] = address.postalCode;
+    if (profile.website) form["organization.website"] = profile.website;
+    if (primary.phone) form["organization.phone"] = primary.phone;
+    if (profile.taxId) form["organization.VAT_number"] = profile.taxId;
+    return ok<ReceiverForm>(form);
+  },
+};
+
+/**
+ * Register the sending business with the reference anchor through the SEP-31 adapter's
+ * `registerCustomer` (SEP-12 `PUT /customer`). Returns the customer id to use as
+ * `SENDER_SEP12_ID`.
+ */
+export function registerReferenceAnchorSender(
+  adapter: Pick<Sep31Adapter, "registerCustomer">,
+  form: ReceiverForm,
+  opts: { readonly account: string },
+): Promise<Outcome<string>> {
+  return adapter.registerCustomer(
+    { ...form },
+    { type: REFERENCE_ANCHOR_SENDER_TYPE, account: opts.account },
+  );
 }
