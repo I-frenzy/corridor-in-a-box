@@ -13,6 +13,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   and a `home_domain`; each `PaymentIntent` supplies the recipient `wallet` (`account`, optional `memo`/`memoType`),
   validated by `WalletDestinationSchema`. Schema and validation only: a wallet lane is reported `not-runnable`
   because the engine cannot execute one yet, and `corridor plan` is unchanged.
+### Added — `RouteRequest`, `RoutePolicy`, `PriceLabel`, `RouteOption` and `RoutePlanner` types ([#603](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/603))
+
+- `@corridor/router` exports `RouteRequest`, `RoutePolicy`, `PriceLabel`, `RouteOption` and
+  `RoutePlanner` (`packages/router/src/planner.ts`), matching the route planner interface sketch
+  in `docs/rfcs/0004-smart-router.md` §1 with TSDoc on every type and field.
 
 ### Added — a custody statement ([#707](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/707))
 
