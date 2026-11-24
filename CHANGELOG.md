@@ -54,6 +54,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   against `schemas/examples/company-profile.v0.json`.
 - `toAlpha3()` in `@corridor/probe` converts the alpha-2 codes its country table holds to
   alpha-3.
+
 ### Added — `corridor profile validate` ([#638](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/638))
 
 - `corridor profile validate <file.json> [--json]` checks a sending business's company profile
