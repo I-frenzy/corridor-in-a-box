@@ -49,6 +49,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   invalid value. Exit 0 when valid, 1 when not, 2 on bad usage.
 - The CLI exports a `CompanyProfile` type for the v0 profile, and its tests run against the
   example profile in `schemas/examples/company-profile.v0.json`.
+
 ### Added — resume-safe route pinning ([#625](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/625))
 
 - `PinnedRouteResolver` in `@corridor/router` resolves a run only to the receiving anchor
