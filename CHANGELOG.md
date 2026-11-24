@@ -54,6 +54,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it reache
   against `schemas/examples/company-profile.v0.json`.
 - `toAlpha3()` in `@corridor/probe` converts the alpha-2 codes its country table holds to
   alpha-3.
+### Added — `corridor profile validate` ([#638](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/638))
+
+- `corridor profile validate <file.json> [--json]` checks a sending business's company profile
+  against the v0 JSON schema from #637 (`schemas/company-profile.v0.schema.json`), compiled with
+  ajv. The schema is bundled into the CLI, so the CLI and the schema are one source of truth.
+  Each problem is reported with its path and whether the field is missing, the wrong type or an
+  invalid value. Exit 0 when valid, 1 when not, 2 on bad usage.
+- The CLI exports a `CompanyProfile` type for the v0 profile, and its tests run against the
+  example profile in `schemas/examples/company-profile.v0.json`.
+
+### Added — resume-safe route pinning ([#625](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/625))
+
+- `PinnedRouteResolver` in `@corridor/router` resolves a run only to the receiving anchor
+  stored on it (`receivingDomain`, optional `routeProtocol`), so a resumed run never picks a
+  new anchor. With no stored route, or a stored route for another corridor, it refuses with
+  `UnpinnedRouteError`. On the public network, or whenever a registry is configured, it
+  applies the same `checkAttestation` gate as `RegistryRouteResolver`.
+- A pinned domain that differs from the passed corridor needs a `corridorFor` lookup that
+  returns that anchor's corridor. Without one the resolver refuses rather than rewriting
+  `home_domain` alone, which would attest one anchor while the adapter still called the
+  other's endpoints.
 
 ### Added — a custody statement ([#707](https://github.com/corridor-in-a-box/corridor-in-a-box/issues/707))
 
